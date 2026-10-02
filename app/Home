@@ -1,1 +1,63 @@
+"""
+EMIPredict AI — Streamlit Multi-Page Application
+===================================================
+Entry point / Home page. Run with:
+    streamlit run app/Home.py
+"""
+
+import streamlit as st
+
+st.set_page_config(
+    page_title="EMIPredict AI",
+    page_icon="💳",
+    layout="wide",
+)
+
+st.title("💳 EMIPredict AI")
+st.subheader("Intelligent EMI Eligibility & Affordability Prediction Platform")
+
+st.markdown("""
+Welcome to **EMIPredict AI** — an end-to-end machine learning platform that helps
+lenders assess loan applicants across five EMI scenarios (Personal Loan,
+Vehicle, Education, Home Appliances, and E-commerce Shopping EMI).
+
+The platform combines two ML models trained on **404,792 cleaned applicant
+records**:
+
+- **Eligibility Classifier** — predicts whether an applicant is
+  `Eligible`, `High_Risk`, or `Not_Eligible` for the requested EMI.
+- **Affordability Regressor** — estimates the maximum monthly EMI amount
+  an applicant can safely sustain.
+""")
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Training Records", "404,792")
+col2.metric("Engineered Features", "44")
+col3.metric("Classifier Accuracy", "98.1%", help="XGBoost, held-out test set")
+col4.metric("Regressor R²", "0.993", help="XGBoost, held-out test set")
+
+st.markdown("---")
+
+st.markdown("### 🧭 Navigate the app")
+nav1, nav2, nav3, nav4 = st.columns(4)
+with nav1:
+    st.markdown("#### 📊 Data Exploration")
+    st.write("Interactive charts and business insights from the applicant dataset.")
+with nav2:
+    st.markdown("#### 🔮 Predict")
+    st.write("Score a new applicant in real time — eligibility + max affordable EMI.")
+with nav3:
+    st.markdown("#### 🏆 Model Performance")
+    st.write("Compare all trained models and view MLflow experiment results.")
+with nav4:
+    st.markdown("#### 🗂️ Data Explorer")
+    st.write("Browse, filter, and export the underlying applicant dataset.")
+
+st.info("Use the sidebar to navigate between pages.", icon="👈")
+
+st.markdown("---")
+st.caption(
+    "EMIPredict AI · Models: XGBoost Classifier (eligibility) & XGBoost Regressor "
+    "(max monthly EMI) · Tracked with MLflow · Built with scikit-learn, XGBoost & Streamlit"
+)
 
