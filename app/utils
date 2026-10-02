@@ -1,0 +1,179 @@
+"""
+EMIPredict AI — Shared App Utilities
+=======================================
+Model/data loading (cached) and the feature-engineering transform used to
+score new applicants submitted through the Prediction page. Mirrors the
+logic in src/feature_engineering.py so the app can run standalone.
+"""
+
+import json
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+ROOT = Path(__file__).resolve().parent.parent
+MODELS_DIR = ROOT / "models"
+DATA_DIR = ROOT / "data"
+MLRUNS_URI = f"sqlite:///{ROOT / 'mlruns' / 'mlflow.db'}"
+
+
+@st.cache_resource
+def load_models():
+    clf = joblib.load(MODELS_DIR / "best_classifier.pkl")
+    reg = joblib.load(MODELS_DIR / "best_regressor.pkl")
+    scaler = joblib.load(MODELS_DIR / "scaler.pkl")
+    clf_encoder = joblib.load(MODELS_DIR / "clf_label_encoder.pkl")
+    with open(MODELS_DIR / "model_metadata.json") as f:
+        meta = json.load(f)
+    return clf, reg, scaler, clf_encoder, meta
+
+
+@st.cache_data
+def load_features_sample(n=50000):
+    df = pd.read_csv(DATA_DIR / "emi_features.csv")
+    if len(df) > n:
+        df = df.sample(n, random_state=42)
+    return df
+
+
+@st.cache_data
+def load_cleaned_sample(n=50000):
+    df = pd.read_csv(DATA_DIR / "emi_cleaned.csv")
+    if len(df) > n:
+        df = df.sample(n, random_state=42)
+    return df
+
+
+CATEGORICAL_OPTIONS = {
+    "gender": ["Female", "Male"],
+    "marital_status": ["Married", "Single"],
+    "education": ["High School", "Graduate", "Post Graduate", "Professional"],
+    "employment_type": ["Private", "Government", "Self-employed"],
+    "company_type": ["Startup", "Small", "Mid-size", "Large Indian", "MNC"],
+    "house_type": ["Rented", "Own", "Family"],
+    "existing_loans": ["No", "Yes"],
+    "emi_scenario": [
+        "Personal Loan EMI", "Vehicle EMI", "Education EMI",
+        "Home Appliances EMI", "E-commerce Shopping EMI",
+    ],
+}
+
+# Fixed category orderings used at training time (must match
+# sklearn LabelEncoder's sorted-class behavior)
+_LABEL_ORDERS = {
+    "gender": sorted(CATEGORICAL_OPTIONS["gender"]),
+    "marital_status": sorted(CATEGORICAL_OPTIONS["marital_status"]),
+    "education": sorted(CATEGORICAL_OPTIONS["education"]),
+    "employment_type": sorted(CATEGORICAL_OPTIONS["employment_type"]),
+    "company_type": sorted(CATEGORICAL_OPTIONS["company_type"]),
+    "house_type": sorted(CATEGORICAL_OPTIONS["house_type"]),
+    "existing_loans": sorted(CATEGORICAL_OPTIONS["existing_loans"]),
+    "emi_scenario": sorted(CATEGORICAL_OPTIONS["emi_scenario"]),
+}
+
+
+def engineer_single_applicant(raw: dict) -> pd.DataFrame:
+    """Takes a dict of raw applicant inputs (from the form) and produces a
+    single-row feature dataframe matching FEATURE_COLUMNS, using the same
+    transforms as src/feature_engineering.py."""
+    df = pd.DataFrame([raw])
+
+    salary = max(df.loc[0, "monthly_salary"], 1)
+
+    total_expenses = (
+        df["monthly_rent"] + df["school_fees"] + df["college_fees"]
+        + df["travel_expenses"] + df["groceries_utilities"]
+        + df["other_monthly_expenses"]
+    )
+    total_obligations = total_expenses + df["current_emi_amount"]
+    df["total_monthly_expenses"] = total_expenses
+    df["total_financial_obligations"] = total_obligations
+
+    df["debt_to_income_ratio"] = (df["current_emi_amount"] / salary).clip(0, 5)
+    df["expense_to_income_ratio"] = (total_expenses / salary).clip(0, 5)
+    df["obligation_to_income_ratio"] = (total_obligations / salary).clip(0, 5)
+    df["disposable_income"] = df["monthly_salary"] - total_obligations
+    df["disposable_income_ratio"] = (df["disposable_income"] / salary).clip(-5, 5)
+
+    tenure = max(df.loc[0, "requested_tenure"], 1)
+    df["requested_emi_estimate"] = df["requested_amount"] / tenure
+    df["requested_emi_to_income_ratio"] = (df["requested_emi_estimate"] / salary).clip(0, 5)
+
+    df["emergency_fund_to_salary_ratio"] = (df["emergency_fund"] / salary).clip(0, 50)
+    df["bank_balance_to_salary_ratio"] = (df["bank_balance"] / salary).clip(0, 50)
+    df["dependents_per_income"] = (df["dependents"] / (salary / 10000)).clip(0, 50)
+
+    credit_score = df.loc[0, "credit_score"]
+    if credit_score <= 579:
+        credit_risk = 4
+    elif credit_score <= 669:
+        credit_risk = 3
+    elif credit_score <= 739:
+        credit_risk = 2
+    elif credit_score <= 799:
+        credit_risk = 1
+    else:
+        credit_risk = 0
+    df["credit_risk_score"] = credit_risk
+
+    stability_map = {"Government": 0, "Private": 1, "Self-employed": 2}
+    stability_employment = stability_map.get(df.loc[0, "employment_type"], 1)
+    yoe = df.loc[0, "years_of_employment"]
+    if yoe <= 1:
+        tenure_risk = 3
+    elif yoe <= 3:
+        tenure_risk = 2
+    elif yoe <= 7:
+        tenure_risk = 1
+    else:
+        tenure_risk = 0
+    df["employment_stability_score"] = min(stability_employment + tenure_risk, 5)
+
+    df["existing_loan_flag"] = int(df.loc[0, "existing_loans"] == "Yes")
+
+    df["affordability_risk_score"] = max(
+        min(df.loc[0, "obligation_to_income_ratio"], 2) * 2
+        + df.loc[0, "credit_risk_score"] * 0.5
+        + df.loc[0, "existing_loan_flag"] * 1
+        - min(df.loc[0, "emergency_fund_to_salary_ratio"], 3) * 0.3,
+        0,
+    )
+
+    df["income_x_credit"] = df["monthly_salary"] * (df["credit_score"] / 850)
+    df["age_x_experience"] = df["age"] * df["years_of_employment"]
+    df["tenure_x_amount"] = df["requested_tenure"] * df["requested_amount"]
+
+    for col, ordering in _LABEL_ORDERS.items():
+        df[col + "_enc"] = ordering.index(df.loc[0, col])
+
+    return df
+
+
+def predict_applicant(raw: dict):
+    clf, reg, scaler, clf_encoder, meta = load_models()
+    feature_cols = meta["feature_columns"]
+
+    X = engineer_single_applicant(raw)[feature_cols]
+
+    clf_use_scaled = meta["best_classifier"]["use_scaled"]
+    reg_use_scaled = meta["best_regressor"]["use_scaled"]
+
+    X_clf = pd.DataFrame(scaler.transform(X), columns=feature_cols) if clf_use_scaled else X
+    X_reg = pd.DataFrame(scaler.transform(X), columns=feature_cols) if reg_use_scaled else X
+
+    pred_class_idx = clf.predict(X_clf)[0]
+    pred_proba = clf.predict_proba(X_clf)[0]
+    pred_class = clf_encoder.inverse_transform([pred_class_idx])[0]
+    class_labels = list(clf_encoder.classes_)
+
+    pred_max_emi = float(reg.predict(X_reg)[0])
+
+    return {
+        "eligibility": pred_class,
+        "probabilities": dict(zip(class_labels, pred_proba.tolist())),
+        "max_monthly_emi": pred_max_emi,
+        "features": X.iloc[0].to_dict(),
+    }
